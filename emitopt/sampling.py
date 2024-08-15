@@ -44,7 +44,7 @@ def draw_product_kernel_prior_paths(model, n_samples):
     )  # expects ProductKernel (Matern x Polynomial)
     matern_dims = copy.copy(model.covar_module.base_kernel.kernels[matern_idx].active_dims)
     # add assert matern
-    matern_covar_module.active_dims = None
+    matern_covar_module.active_dims = torch.tensor([i for i in range(len(matern_dims))])
     matern_covar_module = gpytorch.kernels.ScaleKernel(matern_covar_module)
     matern_covar_module.outputscale = copy.copy(model.covar_module.outputscale.detach())
 
