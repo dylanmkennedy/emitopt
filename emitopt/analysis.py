@@ -121,7 +121,8 @@ def compute_emit_bmag(k: Tensor,
                       rmat: Tensor, 
                       beta0: float=None, 
                       alpha0: float=None, 
-                      thick: bool=True):
+                      thick: bool=True,
+                      maxiter: int=None):
     """
     Computes the emittance(s) corresponding to a set of quadrupole measurement scans
     using a thick OR thin quad model.
@@ -154,7 +155,7 @@ def compute_emit_bmag(k: Tensor,
     SOURCE PAPER: http://www-library.desy.de/preparch/desy/thesis/desy-thesis-05-014.pdf
     """
     # get initial sigma 
-    sig, total_rmats = reconstruct_beam_matrix(k, beamsize_squared, q_len, rmat, thick=thick)
+    sig, total_rmats = reconstruct_beam_matrix(k, beamsize_squared, q_len, rmat, thick=thick, maxiter=maxiter)
     emit = torch.sqrt(sig[...,0,0]*sig[...,2,0] - sig[...,1,0]**2) # result shape (batchshape)
 
     # check sigma matrix and emit for physical validity

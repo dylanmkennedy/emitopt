@@ -40,7 +40,7 @@ def compute_bmag(sig, emit, total_rmats, beta0, alpha0):
     return bmag
 
 
-def reconstruct_beam_matrix(k, beamsize_squared, q_len, rmat, thick=True):
+def reconstruct_beam_matrix(k, beamsize_squared, q_len, rmat, thick=True, maxiter=None):
     """
     Reconstructs the beam matrices corresponding to a set of quadrupole measurement scans
     using a thick quad model and the pseudoinverse method.
@@ -79,13 +79,13 @@ def reconstruct_beam_matrix(k, beamsize_squared, q_len, rmat, thick=True):
     # shapes (batchshape x 3 x nsteps) @ (batchshape x nsteps x 1)
 
     # alternatively, get sigma elements using non-linear fitting with scipy.optimize.minimize
-    sig = fit_sigma(amat, beamsize_squared.unsqueeze(-1))
+    sig = fit_sigma(amat, beamsize_squared.unsqueeze(-1), maxiter=maxiter)
     
     # result shape (batchshape x 3 x 1) containing column vectors of [sig11, sig12, sig22]
     
     return sig, total_rmats
 
-def fit_sigma(amat, beamsize_squared):
+def fit_sigma(amat, beamsize_squared, maxiter=None):
     # nonlinear fitting using scipy/numpy
     def fit_error(params):
         params = torch.reshape(params, [*beamsize_squared.shape[:-2],3,1])
@@ -127,7 +127,7 @@ def fit_sigma(amat, beamsize_squared):
                    init_params, 
                    jac=fit_error_jacobian,
                    bounds=bounds,
-                   # options={'maxiter':100}
+                   options={'maxiter':maxiter}
                   )
     fit_params = torch.from_numpy(res.x)
 
