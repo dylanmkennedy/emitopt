@@ -422,6 +422,9 @@ class GridMinimizeEmitBmag(ScipyMinimizeEmittanceXY):
         description="Whether to multiply the emit by the bmag to get virtual objective.")
     results: dict = Field({},
         description="Dictionary to store results from emittance calculcation")
+    maxiter_fit: int = Field(20,
+        description="Maximum number of iterations in nonlinear emittance fitting.")
+
     
     @property
     def observable_names_ordered(self) -> list:  
@@ -670,7 +673,8 @@ class GridMinimizeEmitBmag(ScipyMinimizeEmittanceXY):
                                           rmat, 
                                           beta0,
                                           alpha0,
-                                          thick=self.thick_quad)
+                                          thick=self.thick_quad,
+                                          maxiter=self.maxiter_fit)
         # result shapes: (n_samples x n_tuning), (n_samples x n_tuning x nsteps), (n_samples x n_tuning x 3 x 1), (n_samples x n_tuning) 
         # or (2*n_samples x n_tuning), (2*n_samples x n_tuning x nsteps), (2*n_samples x n_tuning x 3 x 1), (2*n_samples x n_tuning) 
 
@@ -714,6 +718,7 @@ class DifferentialEvolutionEmitBmag(GridMinimizeEmitBmag):
                 
             def wrapped_virtual_objective(x):
                 x = torch.from_numpy(x)
+                print(x.T.unsqueeze(0).shape)
                 res = self.evaluate_virtual_objective(sample_funcs_list, x.T.unsqueeze(0), bounds, use_bmag=self.use_bmag)
                 return res[0,:].numpy()
             
@@ -732,7 +737,8 @@ class DifferentialEvolutionEmitBmag(GridMinimizeEmitBmag):
             y_exe = torch.cat((y_exe, best_meas_scan_y))
 
             print(best_x_tuning)
-        return x_exe, y_exe, {}
+            results = {}
+        return x_exe, y_exe, results
 
 class ScipyBeamAlignment(Algorithm, ABC):
     name = "ScipyBeamAlignment"
@@ -996,3 +1002,157 @@ class ScipyBeamAlignment(Algorithm, ABC):
                 sample_funcs_list, x_tuning, meas_dims, meas_scans
             )[0]
         )
+
+from typing import Callable
+class CurveMatch(Algorithm, ABC):
+    name = "CurveMatch"
+    curve_fn: Callable
+    meas_dim: int
+    n_grid_points: int
+    popsize: int = Field(15,
+        description="Number of points sampled in each generation of evolutionary algorithm.")
+    maxiter: int = Field(10,
+        description="Max number of generations in the evolutionary algorithm.")
+    polish: bool = Field(False,
+        description="Whether to use gradient-based optimization after evolution to further optimize result.")
+
+    @property
+    def observable_names_ordered(self) -> list:  
+        # get observable model names in the order they appear in the model (ModelList)
+        return ['y']
+
+    def get_execution_paths(self, model: ModelList, bounds: Tensor, tkwargs=None, verbose=False):
+        # get the positions in tuning parameter space that minimize the loss (MSE) for each virtual function (sample)
+        # Steps: 
+        # draw virtual functions (samples)
+        # start with some initial guesses for the tuning parameters for each virtual function
+        # optimize the losses for each virtual function with respect to tuning parameter values
+
+        # target function for optimization will do:
+        # evaluate virtual scans (curves) at given tuning parameter locations using mesh grid
+        # compute loss (total squared error) for each virtual scan
+        # return sum of loss functions from each virtual scan
+
+        # considerations:
+        # need to match TWO curves for emittance x&y minimization...
+        tkwargs = tkwargs if tkwargs else {"dtype": torch.double, "device": "cpu"}
+        opt_bounds = torch.clone(bounds.T)
+        opt_bounds[self.meas_dim] = torch.tensor([0,0])
+
+        x_exe = torch.tensor([])
+        y_exe = torch.tensor([])
+        cpu_models = [copy.deepcopy(m).cpu() for m in model.models]
+        for s in range(self.n_samples): # optimize samples sequentially
+            sample_funcs_list = [draw_product_kernel_post_paths(m, n_samples=1) for m in cpu_models]
+                
+            def wrapped_virtual_objective(x):
+                x = torch.from_numpy(x)
+                res = self.evaluate_virtual_objective(sample_funcs_list, x.T, bounds)
+                return res.detach().numpy()
+            
+            res = differential_evolution(wrapped_virtual_objective, 
+                                         bounds=opt_bounds.numpy(), 
+                                         vectorized=True, 
+                                         polish=False, 
+                                         popsize=self.popsize, 
+                                         maxiter=self.maxiter, 
+                                         seed=1)
+            best_x =torch.from_numpy(res.x)
+            best_x_tuning = best_x[torch.arange(best_x.shape[0])!=self.meas_dim].reshape(1,1,-1)
+            best_meas_scan_x = self.get_meas_scan_inputs(best_x_tuning, bounds)
+            best_meas_scan_y = torch.vstack([sample_func(best_meas_scan_x) for sample_func in sample_funcs_list]).T.unsqueeze(0)
+            x_exe = torch.cat((x_exe, best_meas_scan_x))
+            y_exe = torch.cat((y_exe, best_meas_scan_y))
+
+            print('x_exe =', x_exe)
+            print('y_exe =', y_exe)
+            results = {}
+        return x_exe, y_exe, results
+
+    def get_meas_scan_inputs(self, x_tuning: Tensor, bounds: Tensor, tkwargs: dict=None):
+        """
+        A function that generates the inputs for virtual emittance measurement scans at the tuning
+        configurations specified by x_tuning.
+
+        Parameters:
+            x_tuning: a tensor of shape n_points x n_tuning_dims, where each row specifies a tuning
+                        configuration where we want to do an emittance scan.
+                        >>batchshape x n_tuning_configs x n_tuning_dims (ex: batchshape = n_samples x n_tuning_configs)
+        Returns:
+            xs: tensor, shape (n_tuning_configs*n_steps_meas_scan) x d,
+                where n_tuning_configs = x_tuning.shape[0],
+                n_steps_meas_scan = len(x_meas),
+                and d = x_tuning.shape[1] -- the number of tuning parameters
+                >>batchshape x n_tuning_configs*n_steps x ndim
+        """
+        # each row of x_tuning defines a location in the tuning parameter space
+        # along which to perform a quad scan and evaluate emit
+
+        # expand the x tensor to represent quad measurement scans
+        # at the locations in tuning parameter space specified by X
+        tkwargs = tkwargs if tkwargs else {"dtype": torch.double, "device": "cpu"}
+
+        x_meas = torch.linspace(
+            *bounds.T[self.meas_dim], self.n_grid_points, **tkwargs
+        )
+        
+        # prepare column of measurement scans coordinates
+        x_meas_expanded = x_meas.reshape(-1,1).repeat(*x_tuning.shape[:-1],1)
+        
+        # repeat tuning configs as necessary and concat with column from the line above
+        # to make xs shape: (n_tuning_configs*n_steps_quad_scan) x d ,
+        # where d is the full dimension of the model/posterior space (tuning & meas)
+        x_tuning_expanded = torch.repeat_interleave(x_tuning, 
+                                                    self.n_grid_points, 
+                                                    dim=-2)
+
+
+        x = torch.cat(
+            (x_tuning_expanded[..., :self.meas_dim], x_meas_expanded, x_tuning_expanded[..., self.meas_dim:]), 
+            dim=-1
+        )
+
+        return x
+    
+    def evaluate_virtual_objective(self, model, x, bounds):
+        # evaluate model posterior curve on mesh grid in measurement domain
+        # at specified tuning parameter locations
+        tuning_idxs = torch.arange(bounds.shape[1])
+        tuning_idxs = tuning_idxs[tuning_idxs!=self.meas_dim] # remove measurement dim index
+        x_tuning = x[...,tuning_idxs]
+        virtual_values = self.evaluate_model_posterior_curve(model, x_tuning, bounds)
+        # evaluate target curve on mesh grid in measurement domain
+        target_values = self.evaluate_target_curve(bounds)
+        # evaluate loss (sum of squared error)
+        loss = self.loss_fn(target_values, virtual_values)
+        print('loss =', loss)
+        return loss
+
+    def evaluate_target_curve(self, bounds, tkwargs=None):
+        tkwargs = tkwargs if tkwargs else {"dtype": torch.double, "device": "cpu"}
+        x_meas = torch.linspace(*bounds.T[self.meas_dim], self.n_grid_points, **tkwargs)
+        target_vals = self.curve_fn(x_meas)
+        return target_vals.reshape(1,-1)
+        
+    def evaluate_model_posterior_curve(self, model, x_tuning, bounds, tkwargs=None):
+        # evaluate target curve on mesh grid in measurement domain
+        tkwargs = tkwargs if tkwargs else {"dtype": torch.double, "device": "cpu"}
+        # x_meas = torch.linspace(*bounds.T[self.meas_dim], self.n_grid_points, **tkwargs)
+        if isinstance(model, ModelList):
+            pass # TODO: add evaluation for ModelList
+        else: # sample function list evaluation
+            virtual_values = torch.tensor([], **tkwargs)
+            for sample_func in model:
+                # x = torch.repeat_interleave(x_tuning, self.n_grid_points, dim=-2)
+                # x = torch.cat((x[:,:self.meas_dim], 
+                #                x_meas.reshape(-1,1).repeat(x_tuning.shape[-2],1), 
+                #                x[:,self.meas_dim:]), 
+                #                dim=1)
+                x = self.get_meas_scan_inputs(x_tuning, bounds)
+                virtual_values = torch.cat((virtual_values, sample_func(x).reshape(x_tuning.shape[-2], self.n_grid_points)), dim=0)
+        return virtual_values
+
+    def loss_fn(self, target_values, virtual_values):
+        # returns the total squared error of the virtual_values compared to the target_values
+        return (target_values - virtual_values).pow(2).sum(dim=1)
+    
