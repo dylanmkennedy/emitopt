@@ -718,7 +718,6 @@ class DifferentialEvolutionEmitBmag(GridMinimizeEmitBmag):
                 
             def wrapped_virtual_objective(x):
                 x = torch.from_numpy(x)
-                print(x.T.unsqueeze(0).shape)
                 res = self.evaluate_virtual_objective(sample_funcs_list, x.T.unsqueeze(0), bounds, use_bmag=self.use_bmag)
                 return res[0,:].numpy()
             

@@ -74,7 +74,6 @@ def draw_product_kernel_prior_paths(model, n_samples):
     )
 
 
-
     poly_prior_paths = [draw_poly_kernel_prior_paths(k, n_samples) 
                         for k in model.covar_module.base_kernel.kernels
                         if type(k) != MaternKernel]
